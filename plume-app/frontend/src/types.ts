@@ -30,6 +30,19 @@ export interface GridSpec {
   ny: number
 }
 
+/** 有限矩形内的线性背景梯度（E/N 以源为原点，米）。 */
+export interface BackgroundGradient {
+  base_ug_m3: number
+  dcd_east_ug_m3_m: number
+  dcd_north_ug_m3_m: number
+  e_min_m: number
+  e_max_m: number
+  n_min_m: number
+  n_max_m: number
+}
+
+export type NullableField = (number | null)[][]
+
 export interface SourceRow extends SourceInput {
   id: number
 }
@@ -57,8 +70,31 @@ export interface PlumeGridResponse {
     resolution_disclaimer: string
   }
   plume_field_ug_m3: number[][]
-  background_conc_ug_m3: number
-  total_conc_ug_m3: number[][]
+  background_conc_ug_m3: number | NullableField
+  total_conc_ug_m3: NullableField
+  background_info: {
+    mode: 'constant' | 'linear_rect'
+    background_conc_ug_m3?: number
+    description?: string
+    formula?: string
+    base_ug_m3?: number
+    base_anchor?: string
+    dcd_east_ug_m3_m?: number
+    dcd_north_ug_m3_m?: number
+    rect_east_m?: [number, number]
+    rect_north_m?: [number, number]
+    corner_values_ug_m3?: Record<string, number>
+    min_ug_m3?: number
+    max_ug_m3?: number
+    outside_rect_behavior?: string
+    non_negative_note?: string
+    rect_corners_lonlat?: [number, number][]
+    source_origin?: {
+      east_north_m: [number, number]
+      lonlat: [number, number]
+      inside_rect: boolean
+    }
+  }
   iso_levels_ug_m3: number[]
   effective_stack_height_m: number
   plume_rise_delta_h_m: number
@@ -89,6 +125,7 @@ export interface PlumeGridRequest {
   parameterization: 'briggs_rural' | 'power_law'
   power_law?: { ay: number; py: number; az: number; pz: number } | null
   calm_threshold_ms: number
+  background_gradient?: BackgroundGradient | null
 }
 
 export interface CheckResult {

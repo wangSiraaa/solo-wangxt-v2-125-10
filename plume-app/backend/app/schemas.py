@@ -43,6 +43,30 @@ class MeteorologyInput(BaseModel):
     background_conc_ug_m3: float = Field(..., ge=0.0, description="背景浓度 μg/m³")
 
 
+class BackgroundGradient(BaseModel):
+    """有限矩形内的线性背景梯度（仅用于单次情景，不写入数据库）。
+
+    C_bg(E,N) = base + dC_dE·E + dC_dN·N，E/N 为以源为原点的局部
+    东/北平面坐标（米，与烟羽计算同一坐标换算）。矩形外背景**未定义**，
+    后端返回 null 并给出范围提示，绝不外推。矩形四角非负校验在
+    services.prepare_background 中执行（PlumeInputError → 422）。
+    """
+
+    base_ug_m3: float = Field(
+        ..., ge=0.0, description="源点(E=N=0)处的背景基准值 μg/m³"
+    )
+    dcd_east_ug_m3_m: float = Field(
+        ..., ge=-1.0, le=1.0, description="东西方向斜率（东为正）μg/m³/m"
+    )
+    dcd_north_ug_m3_m: float = Field(
+        ..., ge=-1.0, le=1.0, description="南北方向斜率（北为正）μg/m³/m"
+    )
+    e_min_m: float = Field(..., ge=-50_000.0, le=50_000.0)
+    e_max_m: float = Field(..., ge=-50_000.0, le=50_000.0)
+    n_min_m: float = Field(..., ge=-50_000.0, le=50_000.0)
+    n_max_m: float = Field(..., ge=-50_000.0, le=50_000.0)
+
+
 class PlumeRiseInput(BaseModel):
     use_plume_rise: bool = Field(
         False, description="是否叠加 Holland 抬升；默认关闭，便于核对源高影响"
@@ -92,17 +116,30 @@ class PlumeGridRequest(BaseModel):
         description="power_law 参数: ay, py, az, pz（均为正）",
     )
     calm_threshold_ms: float = Field(1.0, gt=0.0, le=5.0)
+    background_gradient: BackgroundGradient | None = Field(
+        None,
+        description=(
+            "可选：有限矩形内的线性背景梯度。缺省/为 null 时沿用"
+            " meteorology.background_conc_ug_m3 的空间常数背景。"
+        ),
+    )
 
 
 class PlumeGridResponse(BaseModel):
-    """结果：烟羽、背景、总量分开；网格角点显式给出，避免任何精度暗示。"""
+    """结果：烟羽、背景、总量分开；网格角点显式给出，避免任何精度暗示。
+
+    梯度背景下背景为空间场：``background_conc_ug_m3`` 为逐格点数组
+    （矩形外 null），另以 ``background_constant_ug_m3`` 给出常数模式标量；
+    ``total_conc_ug_m3`` 在矩形外同样为 null。
+    """
 
     source_lonlat: tuple[float, float]
     crs_note: str
     grid: dict
     plume_field_ug_m3: list[list[float]]
-    background_conc_ug_m3: float
-    total_conc_ug_m3: list[list[float]]
+    background_conc_ug_m3: float | list[list[float | None]]
+    total_conc_ug_m3: list[list[float | None]]
+    background_info: dict
     iso_levels_ug_m3: list[float]
     effective_stack_height_m: float
     plume_rise_delta_h_m: float

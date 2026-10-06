@@ -5,6 +5,12 @@ import math
 
 import numpy as np
 
+from .background import (
+    evaluate_linear_background,
+    gradient_corner_values,
+    gradient_metadata,
+    scalar_linear_background,
+)
 from .config import settings
 from .dispersion import STABILITY_CLASSES, parameterization_metadata
 from .gaussian import CalmWindError, PlumeInputError, compute_plume_field
@@ -56,6 +62,56 @@ def effective_height(src: SourceInput, met: MeteorologyInput, use_rise: bool) ->
     )
     detail["used"] = True
     return src.stack_height_m + detail["delta_h_m"], detail
+
+
+def prepare_background(
+    req: PlumeGridRequest, met: MeteorologyInput
+) -> dict:
+    """解析本次请求的背景定义：常数（默认）或矩形内线性梯度。
+
+    纯输入校验，与采样网格完全无关——网格与任意受体点共用本函数，
+    保证同一物理点的背景值不随分辨率变化。
+    """
+    grad = req.background_gradient
+    if grad is None:
+        return {
+            "mode": "constant",
+            "gradient": None,
+            "constant_ug_m3": float(met.background_conc_ug_m3),
+            "info": {
+                "mode": "constant",
+                "background_conc_ug_m3": float(met.background_conc_ug_m3),
+                "description": "空间常数背景（旧默认模式），处处相等",
+            },
+        }
+
+    if grad.e_max_m <= grad.e_min_m or grad.n_max_m <= grad.n_min_m:
+        raise PlumeInputError(
+            "背景梯度矩形边界必须满足 e_min<e_max 且 n_min<n_max"
+        )
+    corners = gradient_corner_values(
+        grad.base_ug_m3,
+        grad.dcd_east_ug_m3_m,
+        grad.dcd_north_ug_m3_m,
+        grad.e_min_m,
+        grad.e_max_m,
+        grad.n_min_m,
+        grad.n_max_m,
+    )
+    bad = {k: v for k, v in corners.items() if v < -1e-9}
+    if bad:
+        detail = "、".join(f"{k}={v:.4g}" for k, v in bad.items())
+        raise PlumeInputError(
+            "线性背景在矩形四角出现负值（"
+            f"{detail}）μg/m³：负背景不合法，请调小斜率或提高基准值；"
+            "本模型不会截断或外推背景"
+        )
+    return {
+        "mode": "linear_rect",
+        "gradient": grad,
+        "constant_ug_m3": None,
+        "info": gradient_metadata(grad),
+    }
 
 
 def build_sampling_grid(spec: GridSpec, wind_from_deg: float, lon0: float, lat0: float) -> dict:
@@ -168,8 +224,65 @@ def run_grid(req: PlumeGridRequest) -> dict:
         calm_threshold_ms=req.calm_threshold_ms,
     )
     plume = result["field"]
-    bg = met.background_conc_ug_m3
-    total = plume + bg
+    bg_def = prepare_background(req, met)
+
+    if bg_def["mode"] == "constant":
+        # 旧默认模式：空间常数背景，响应形状与历史版本完全一致
+        bg_const = bg_def["constant_ug_m3"]
+        inside = np.ones(plume.shape, dtype=bool)
+        bg_num = np.full(plume.shape, bg_const, dtype=float)
+        background_field_out: float | list = float(bg_const)
+    else:
+        # 矩形内线性梯度：网格求值与任意受体点共用同一 E/N 换算
+        bg_values, inside = evaluate_linear_background(
+            grid["east_m"], grid["north_m"], bg_def["gradient"]
+        )
+        bg_num = np.zeros(plume.shape, dtype=float)
+        bg_num[inside] = np.asarray(bg_values[inside], dtype=float)
+        # 矩形外显式 null——不外推；常数模式保持标量返回
+        bg_nullable = np.full(plume.shape, None, dtype=object)
+        bg_nullable[inside] = bg_num[inside]
+        background_field_out = bg_nullable.tolist()
+
+    total_num = plume + bg_num
+    total_nullable = np.full(plume.shape, None, dtype=object)
+    total_nullable[inside] = total_num[inside]
+
+    background_info = dict(bg_def["info"])
+    if bg_def["mode"] == "linear_rect":
+        grad = bg_def["gradient"]
+        rect_corners_e_n = [
+            (grad.e_min_m, grad.n_min_m),
+            (grad.e_max_m, grad.n_min_m),
+            (grad.e_max_m, grad.n_max_m),
+            (grad.e_min_m, grad.n_max_m),
+        ]
+        rect_corners_lonlat = []
+        for ce, cn in rect_corners_e_n:
+            clon, clat = local_to_lonlat(ce, cn, src.lon, src.lat)
+            rect_corners_lonlat.append([float(clon), float(clat)])
+        background_info["rect_corners_lonlat"] = rect_corners_lonlat
+        background_info["source_origin"] = {
+            "east_north_m": [0.0, 0.0],
+            "lonlat": [src.lon, src.lat],
+            "inside_rect": bool(
+                grad.e_min_m <= 0.0 <= grad.e_max_m
+                and grad.n_min_m <= 0.0 <= grad.n_max_m
+            ),
+        }
+    result_diag = dict(result["diagnostics"])
+    result_diag.update(
+        {
+            "background_mode": bg_def["mode"],
+            "n_background_defined_cells": int(np.count_nonzero(inside)),
+            "n_background_outside_rect_cells": int(np.count_nonzero(~inside)),
+            "background_outside_rect_note": (
+                "矩形外背景/总量为 null（未定义，不外推）；烟羽贡献仍单独给出"
+                if bg_def["mode"] == "linear_rect"
+                else "常数背景在全部网格点均有定义"
+            ),
+        }
+    )
 
     return {
         "source_lonlat": [src.lon, src.lat],
@@ -202,8 +315,9 @@ def run_grid(req: PlumeGridRequest) -> dict:
             ),
         },
         "plume_field_ug_m3": plume.tolist(),
-        "background_conc_ug_m3": float(bg),
-        "total_conc_ug_m3": total.tolist(),
+        "background_conc_ug_m3": background_field_out,
+        "total_conc_ug_m3": total_nullable.tolist(),
+        "background_info": background_info,
         "iso_levels_ug_m3": iso_levels(float(plume.max())),
         "effective_stack_height_m": float(h_eff),
         "plume_rise_delta_h_m": float(rise_detail["delta_h_m"]),
@@ -222,7 +336,7 @@ def run_grid(req: PlumeGridRequest) -> dict:
             "stack_temp_k": src.stack_temp_k,
             "plume_rise_detail": rise_detail,
         },
-        "diagnostics": result["diagnostics"],
+        "diagnostics": result_diag,
         "validity": {
             "model": "steady-state Gaussian plume, flat terrain, full ground reflection",
             "assumptions": [
@@ -242,9 +356,14 @@ def run_grid(req: PlumeGridRequest) -> dict:
 
 
 def run_points(req: "PlumePointRequest") -> list[dict]:
-    """在任意经纬度点上求值（核对用），与采样网格完全无关。"""
+    """在任意经纬度点上求值（核对用），与采样网格完全无关。
+
+    背景求值与网格路径共用 prepare_background 与同一 E/N 坐标换算，
+    因此同一受体点改网格分辨率时结果不变。
+    """
     src, met = merge_overrides(req)
     h_eff, rise_detail = effective_height(src, met, req.plume_rise.use_plume_rise)
+    bg_def = prepare_background(req, met)
     out = []
     for lon, lat in req.points:
         e, n = lonlat_to_local(lon, lat, src.lon, src.lat)
@@ -265,14 +384,39 @@ def run_points(req: "PlumePointRequest") -> list[dict]:
         x = float(result["x_downwind_m"][0, 0])
         y = float(result["y_crosswind_m"][0, 0])
         plume = float(result["field"][0, 0])
+
+        if bg_def["mode"] == "constant":
+            bg_value: float | None = bg_def["constant_ug_m3"]
+            in_domain = True
+            range_note = "常数背景，处处有定义"
+            total_value: float | None = plume + bg_value
+        else:
+            bg_value, in_domain = scalar_linear_background(
+                e, n, bg_def["gradient"]
+            )
+            g = bg_def["gradient"]
+            if in_domain:
+                total_value = plume + bg_value
+                range_note = "点位于背景梯度矩形内"
+            else:
+                total_value = None
+                range_note = (
+                    "点位于背景梯度矩形外"
+                    f"（E∈[{g.e_min_m:g},{g.e_max_m:g}] m，"
+                    f"N∈[{g.n_min_m:g},{g.n_max_m:g}] m；"
+                    f"本点 E={e:.1f}, N={n:.1f} m）：背景未定义、不外推，"
+                    "total 返回 null；烟羽贡献仍单独给出"
+                )
         out.append(
             {
                 "lonlat": [lon, lat],
                 "east_north_m": [e, n],
                 "downwind_crosswind_m": [x, y],
                 "plume_conc_ug_m3": plume,
-                "background_conc_ug_m3": met.background_conc_ug_m3,
-                "total_conc_ug_m3": plume + met.background_conc_ug_m3,
+                "background_conc_ug_m3": bg_value,
+                "total_conc_ug_m3": total_value,
+                "background_in_domain": in_domain,
+                "background_range_note": range_note,
                 "sigma_y_m": float(result["sigma_y_m"][0, 0]),
                 "sigma_z_m": float(result["sigma_z_m"][0, 0]),
             }

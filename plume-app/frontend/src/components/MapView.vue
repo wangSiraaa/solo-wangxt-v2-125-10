@@ -4,10 +4,12 @@ import maplibregl from 'maplibre-gl'
 import type { PlumeGridResponse } from '../types'
 import {
   gridFillPolygons,
+  gridNullableFillPolygons,
   marchingSquares,
+  rectBoundary,
   samplingBoundary,
 } from '../marching'
-import { makeColorFor } from '../colors'
+import { bgColorFor, makeColorFor } from '../colors'
 
 const props = defineProps<{
   result: PlumeGridResponse | null
@@ -20,8 +22,9 @@ const hover = ref<{
   lon: number
   lat: number
   plume: number
-  total: number
-  bg: number
+  total: number | null
+  bg: number | null
+  inDomain: boolean
   xm: number
   ym: number
 } | null>(null)
@@ -31,6 +34,11 @@ let sourceMarker: maplibregl.Marker | null = null
 let rafPending = false
 
 const R = 6371000
+
+function bgScalarAt(r: PlumeGridResponse, row: number, col: number): number | null {
+  const bg = r.background_conc_ug_m3
+  return typeof bg === 'number' ? bg : bg[row]?.[col] ?? null
+}
 
 function blankStyle(): maplibregl.StyleSpecification {
   const style: any = {
@@ -80,6 +88,15 @@ onMounted(() => {
         'fill-color': ['get', 'color'],
         'fill-opacity': 0.16,
       },
+    })
+    // 背景梯度定义域矩形（实线蓝绿，区别于虚线采样边界）
+    map!.addSource('bgrect', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map!.addLayer({
+      id: 'bgrect-line',
+      type: 'line',
+      source: 'bgrect',
+      layout: { visibility: 'none' },
+      paint: { 'line-color': '#0f766e', 'line-width': 1.8 },
     })
     map!.addSource('fill', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map!.addLayer({
@@ -168,7 +185,8 @@ function onMouseMove(e: maplibregl.MapMouseEvent) {
       lat,
       plume: r.plume_field_ug_m3[br][bc],
       total: r.total_conc_ug_m3[br][bc],
-      bg: r.background_conc_ug_m3,
+      bg: bgScalarAt(r, br, bc),
+      inDomain: r.total_conc_ug_m3[br][bc] !== null,
       xm: r.grid.x_edges_m[bc],
       ym: r.grid.y_edges_m[br],
     }
@@ -243,28 +261,56 @@ function render(r: PlumeGridResponse) {
     : { type: 'FeatureCollection' as const, features: [] }
   ;(map.getSource('fill') as maplibregl.GeoJSONSource).setData(fillFC as any)
 
-  // 背景值叠加：采样矩形内均匀单层，灰蓝色，只表示空间常数背景
-  const bgFC =
-    props.showBg && r.background_conc_ug_m3 > 0
-      ? {
-          type: 'FeatureCollection' as const,
-          features: [
-            {
-              type: 'Feature' as const,
-              properties: {
-                color: '#2563eb',
-                bg: r.background_conc_ug_m3,
-              },
-              geometry: samplingBoundary(r.grid.corners_lonlat).geometry,
-            },
-          ],
-        }
-      : { type: 'FeatureCollection' as const, features: [] }
+  // 背景值叠加：常数模式＝采样矩形内单层灰蓝；
+  // 线性梯度模式＝矩形内逐格点蓝绿填色，矩形外留空（null，不外推）
+  const info = r.background_info
+  const isGradient = info?.mode === 'linear_rect'
+  let bgFC: GeoJSON.FeatureCollection
+  if (!props.showBg) {
+    bgFC = { type: 'FeatureCollection', features: [] }
+  } else if (isGradient && typeof r.background_conc_ug_m3 !== 'number') {
+    const bgField = r.background_conc_ug_m3
+    const cfn = bgColorFor(info.min_ug_m3 ?? 0, info.max_ug_m3 ?? 0)
+    bgFC = gridNullableFillPolygons(
+      bgField,
+      r.grid.lon_grid,
+      r.grid.lat_grid,
+      cfn,
+    )
+  } else if (!isGradient && (r.background_conc_ug_m3 as number) > 0) {
+    bgFC = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            color: '#2563eb',
+            bg: r.background_conc_ug_m3,
+          },
+          geometry: samplingBoundary(r.grid.corners_lonlat).geometry,
+        },
+      ],
+    }
+  } else {
+    bgFC = { type: 'FeatureCollection', features: [] }
+  }
   ;(map.getSource('bgval') as maplibregl.GeoJSONSource).setData(bgFC as any)
   map!.setLayoutProperty(
     'bgval-layer',
     'visibility',
     props.showBg ? 'visible' : 'none',
+  )
+
+  // 背景梯度定义域矩形
+  const rectCorners = isGradient ? info.rect_corners_lonlat ?? [] : []
+  ;(map.getSource('bgrect') as maplibregl.GeoJSONSource).setData({
+    type: 'FeatureCollection',
+    features: rectCorners.length ? [rectBoundary(rectCorners)] : [],
+  } as any)
+  map!.setLayoutProperty(
+    'bgrect-line',
+    'visibility',
+    props.showBg && isGradient ? 'visible' : 'none',
   )
 
   // 等值线永远是“烟羽贡献”等值线
@@ -316,7 +362,7 @@ function render(r: PlumeGridResponse) {
 function clearMap() {
   if (!map || !map.getSource('fill')) return
   const empty = { type: 'FeatureCollection' as const, features: [] }
-  for (const id of ['fill', 'iso', 'bgval', 'boundary', 'wind']) {
+  for (const id of ['fill', 'iso', 'bgval', 'bgrect', 'boundary', 'wind']) {
     ;(map.getSource(id) as maplibregl.GeoJSONSource).setData(empty as any)
   }
   sourceMarker?.remove()
@@ -348,11 +394,23 @@ watch(
       </div>
       <div class="muted">虚线矩形＝采样边界，结果不外推到界外</div>
     </div>
-    <div v-if="hover" class="legend" style="width: 250px">
+    <div v-if="hover" class="legend" style="width: 264px">
       <div><b>最近采样点</b>（x={{ hover.xm.toFixed(0) }} m, y={{ hover.ym.toFixed(0) }} m）</div>
       <div>烟羽贡献：<b>{{ hover.plume.toFixed(2) }}</b> μg/m³</div>
-      <div>背景值：{{ hover.bg.toFixed(2) }} μg/m³</div>
-      <div>总量：<b>{{ hover.total.toFixed(2) }}</b> μg/m³</div>
+      <div>
+        背景值：
+        <template v-if="hover.bg !== null">{{ hover.bg.toFixed(2) }} μg/m³</template>
+        <template v-else>
+          <b>null（矩形外，背景未定义、不外推）</b>
+        </template>
+      </div>
+      <div>
+        总量：
+        <template v-if="hover.total !== null">
+          <b>{{ hover.total.toFixed(2) }}</b> μg/m³
+        </template>
+        <template v-else><b>null</b>（烟羽 {{ hover.plume.toFixed(2) }} 仍单独给出）</template>
+      </div>
       <div class="muted">{{ hover.lon.toFixed(5) }}, {{ hover.lat.toFixed(5) }}</div>
     </div>
   </div>

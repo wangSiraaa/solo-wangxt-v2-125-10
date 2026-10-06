@@ -78,19 +78,43 @@ function fmt(v: number, d = 2) {
           <dl class="kv">
             <dt>烟羽贡献 最大值</dt>
             <dd><b>{{ fmt(result.diagnostics.max_plume_conc_ug_m3) }}</b></dd>
-            <dt>背景浓度（空间常数）</dt>
-            <dd>{{ fmt(result.background_conc_ug_m3) }}</dd>
-            <dt>总浓度 最大值</dt>
+            <template v-if="result.background_info.mode === 'constant'">
+              <dt>背景浓度（空间常数）</dt>
+              <dd>{{ fmt(result.background_info.background_conc_ug_m3 ?? 0) }}</dd>
+            </template>
+            <template v-else>
+              <dt>背景（矩形内线性梯度）</dt>
+              <dd>
+                {{ fmt(result.background_info.min_ug_m3 ?? 0) }} –
+                {{ fmt(result.background_info.max_ug_m3 ?? 0) }}
+              </dd>
+              <dt>背景基准 base（源点）</dt>
+              <dd>{{ fmt(result.background_info.base_ug_m3 ?? 0) }}</dd>
+              <dt>斜率 dC/dE、dC/dN</dt>
+              <dd class="mono" style="font-size:11px">
+                {{ ((result.background_info.dcd_east_ug_m3_m ?? 0) * 1000).toFixed(2) }},
+                {{ ((result.background_info.dcd_north_ug_m3_m ?? 0) * 1000).toFixed(2) }}
+                μg/m³/km
+              </dd>
+            </template>
+            <dt>总浓度 最大值（定义域内）</dt>
             <dd>
               {{
                 fmt(
-                  Math.max(...result.total_conc_ug_m3.flat().filter(isFinite)),
+                  Math.max(...result.total_conc_ug_m3.flat().filter(
+                    (v): v is number => typeof v === 'number' && isFinite(v),
+                  )),
                 )
               }}
             </dd>
           </dl>
           <div class="muted" style="font-size:11px;margin-top:4px">
             总量 = 烟羽贡献 + 背景值；三者分别返回。
+            <template v-if="result.background_info.mode === 'linear_rect'">
+              背景仅在有限矩形内有定义；矩形外背景/总量为 <b>null</b>
+              （{{ result.diagnostics.n_background_outside_rect_cells }} 个采样格），
+              不做外推，烟羽贡献仍单独给出。
+            </template>
           </div>
         </div>
 
@@ -134,6 +158,40 @@ function fmt(v: number, d = 2) {
               }"
             />
             <span class="mono">≥ {{ fmt(s.level, s.level < 1 ? 2 : 1) }}</span>
+          </div>
+        </div>
+
+        <div v-if="result.background_info.mode === 'linear_rect'" class="section">
+          <h2>背景梯度定义域</h2>
+          <table class="meta-tbl">
+            <tr><th>量</th><th>值</th></tr>
+            <tr>
+              <td>E（东西）范围</td>
+              <td class="mono">
+                {{ result.background_info.rect_east_m?.[0] }} –
+                {{ result.background_info.rect_east_m?.[1] }} m
+              </td>
+            </tr>
+            <tr>
+              <td>N（南北）范围</td>
+              <td class="mono">
+                {{ result.background_info.rect_north_m?.[0] }} –
+                {{ result.background_info.rect_north_m?.[1] }} m
+              </td>
+            </tr>
+            <tr v-for="(v, k) in result.background_info.corner_values_ug_m3" :key="k">
+              <td>角点 {{ k.toUpperCase() }} 背景</td>
+              <td class="mono">{{ fmt(v, 2) }} μg/m³</td>
+            </tr>
+            <tr>
+              <td>源点是否在矩形内</td>
+              <td class="mono">
+                {{ result.background_info.source_origin?.inside_rect ? '是' : '否' }}
+              </td>
+            </tr>
+          </table>
+          <div class="notice info" style="margin-top:6px">
+            {{ result.background_info.outside_rect_behavior }}
           </div>
         </div>
 

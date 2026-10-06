@@ -106,6 +106,33 @@ def meta():
             "default_threshold_ms": settings.default_calm_threshold_ms,
             "behavior": "低于阈值返回 422 calm_wind，拒绝硬算",
         },
+        "background": {
+            "default_mode": "constant",
+            "constant": {
+                "field": "meteorology.background_conc_ug_m3",
+                "description": "空间常数背景（旧默认），plume/background/total 严格分开",
+            },
+            "linear_rect": {
+                "request_field": "background_gradient",
+                "formula": "C_bg(E,N) = base + dC_dE*E + dC_dN*N",
+                "coordinates": (
+                    "E/N 为以源为原点的局部东/北平面坐标（米），"
+                    "网格与任意受体点使用同一换算"
+                ),
+                "fields": [
+                    "base_ug_m3（源点 E=N=0 基准值，≥0）",
+                    "dcd_east_ug_m3_m（东西斜率，东为正）",
+                    "dcd_north_ug_m3_m（南北斜率，北为正）",
+                    "e_min_m/e_max_m/n_min_m/n_max_m（有限矩形，米）",
+                ],
+                "rules": [
+                    "仅用于单次情景，不写入数据库",
+                    "base 与矩形四角取值必须均 ≥ 0，否则 422 invalid_input",
+                    "矩形外背景/总量返回 null 并附范围提示，绝不外推",
+                    "斜率全为 0 时与旧常数背景模式逐点一致",
+                ],
+            },
+        },
         "stability_classes": [
             {"class": s, **STABILITY_DESCRIPTIONS[s]} for s in STABILITY_CLASSES
         ],

@@ -140,3 +140,52 @@ export function samplingBoundary(
     geometry: { type: 'Polygon', coordinates: [ring] },
   }
 }
+
+/**
+ * 允许 null（背景梯度矩形外）的填色栅格：
+ * 单元任一节点为 null 即跳过，绝不把界外当成 0 或外推填色。
+ */
+export function gridNullableFillPolygons(
+  z: (number | null)[][],
+  lon: number[][],
+  lat: number[][],
+  colorFor: (v: number) => string,
+): GeoJSON.FeatureCollection {
+  const ny = z.length
+  const nx = z[0].length
+  const features: GeoJSON.Feature[] = []
+  for (let r = 0; r < ny - 1; r++) {
+    for (let c = 0; c < nx - 1; c++) {
+      const v00 = z[r][c]
+      const v11 = z[r + 1][c + 1]
+      if (v00 === null || v11 === null) continue
+      const v = (v00 + v11) / 2
+      const ring = [
+        [lon[r][c], lat[r][c]],
+        [lon[r][c + 1], lat[r][c + 1]],
+        [lon[r + 1][c + 1], lat[r + 1][c + 1]],
+        [lon[r + 1][c], lat[r + 1][c]],
+        [lon[r][c], lat[r][c]],
+      ]
+      features.push({
+        type: 'Feature',
+        properties: { color: colorFor(v), value: v },
+        geometry: { type: 'Polygon', coordinates: [ring] },
+      })
+    }
+  }
+  return { type: 'FeatureCollection', features }
+}
+
+/** 任意经纬度角点（顺时针/逆时针均可闭合）的矩形边框要素。 */
+export function rectBoundary(
+  corners: [number, number][],
+  properties: Record<string, unknown> = {},
+): GeoJSON.Feature<GeoJSON.Polygon> {
+  const ring = [...corners, corners[0]]
+  return {
+    type: 'Feature',
+    properties: { kind: 'gradient-domain', ...properties },
+    geometry: { type: 'Polygon', coordinates: [ring] },
+  }
+}

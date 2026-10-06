@@ -135,3 +135,152 @@ def test_power_law_peak_location_analytic():
     x = data["grid"]["x_edges_m"][ix]
     expected = 60.0 / (math.sqrt(2) * 0.16)
     assert abs(x - expected) / expected < 0.02
+
+
+def _gradient_payload(**grad_overrides):
+    payload = _base_payload(
+        wind_speed=4.0, wind_from=270.0, stability="D", bg=12.0
+    )
+    payload["grid"] = {
+        "downwind_extent_m": 2000.0, "crosswind_extent_m": 1000.0,
+        "upwind_extent_m": 0.0, "nx": 21, "ny": 11,
+    }
+    grad = {
+        "base_ug_m3": 12.0,
+        "dcd_east_ug_m3_m": 0.002,
+        "dcd_north_ug_m3_m": -0.001,
+        "e_min_m": -500.0, "e_max_m": 1500.0,
+        "n_min_m": -400.0, "n_max_m": 400.0,
+    }
+    grad.update(grad_overrides)
+    payload["background_gradient"] = grad
+    return payload
+
+
+def test_gradient_linear_values_and_null_outside():
+    """矩形内背景严格线性；矩形外 bg/total 为 null，烟羽仍返回，计数>0。"""
+    data = client.post("/api/plume/grid", json=_gradient_payload()).json()
+    bg = data["background_conc_ug_m3"]
+    total = data["total_conc_ug_m3"]
+    plume = np.array(data["plume_field_ug_m3"])
+    assert data["background_info"]["mode"] == "linear_rect"
+    n_out = data["diagnostics"]["n_background_outside_rect_cells"]
+    n_in = data["diagnostics"]["n_background_defined_cells"]
+    assert n_out > 0 and n_in + n_out == 21 * 11
+
+    # 中心点（行 5、列 10）：x=1000 下风向(270° → E=1000, N=0)
+    # bg = 12 + 0.002*1000 = 14
+    assert bg[5][10] == pytest.approx(14.0)
+    assert total[5][10] == pytest.approx(plume[5][10] + 14.0)
+
+    for i, row in enumerate(bg):
+        for j, v in enumerate(row):
+            if v is None:
+                assert total[i][j] is None  # 矩形外绝不外推
+            else:
+                assert v >= 0.0
+                assert total[i][j] == pytest.approx(plume[i][j] + v)
+
+
+def test_gradient_same_receptor_resolution_independent():
+    """验收：同一受体改变网格分辨率，背景与烟羽结果不变；/points 一致。"""
+    coarse = _gradient_payload()
+    fine = _gradient_payload()
+    fine["grid"]["nx"], fine["grid"]["ny"] = 41, 21
+    a = client.post("/api/plume/grid", json=coarse).json()
+    b = client.post("/api/plume/grid", json=fine).json()
+    # 物理点 (E=1000, N=0)：粗网格列 10 行 5；细网格列 20 行 10
+    assert a["plume_field_ug_m3"][5][10] == pytest.approx(
+        b["plume_field_ug_m3"][10][20]
+    )
+    assert a["background_conc_ug_m3"][5][10] == pytest.approx(
+        b["background_conc_ug_m3"][10][20]
+    )
+    assert a["total_conc_ug_m3"][5][10] == pytest.approx(
+        b["total_conc_ug_m3"][10][20]
+    )
+
+    src_lon, src_lat = 116.40, 39.90
+    dlon = math.degrees(1000.0 / (6_371_000.0 * math.cos(math.radians(src_lat))))
+    p = _gradient_payload()
+    p["points"] = [[src_lon + dlon, src_lat]]
+    q = client.post("/api/plume/points", json=p).json()["points"][0]
+    assert q["background_in_domain"] is True
+    assert q["background_conc_ug_m3"] == pytest.approx(14.0, abs=1e-6)
+    assert q["plume_conc_ug_m3"] == pytest.approx(
+        b["plume_field_ug_m3"][10][20], abs=1e-6
+    )
+    assert q["total_conc_ug_m3"] == pytest.approx(
+        q["plume_conc_ug_m3"] + q["background_conc_ug_m3"]
+    )
+
+
+def test_gradient_points_outside_rect_has_range_note():
+    """矩形外点：bg/total=null，in_domain=false，明确范围提示；烟羽仍给值。"""
+    src_lon, src_lat = 116.40, 39.90
+    dlon = math.degrees(2000.0 / (6_371_000.0 * math.cos(math.radians(src_lat))))
+    p = _gradient_payload()
+    p["points"] = [[src_lon + 2 * dlon, src_lat]]  # E≈2000 m > e_max=1500
+    q = client.post("/api/plume/points", json=p).json()["points"][0]
+    assert q["background_in_domain"] is False
+    assert q["background_conc_ug_m3"] is None
+    assert q["total_conc_ug_m3"] is None
+    assert q["plume_conc_ug_m3"] >= 0.0  # 烟羽贡献不受背景定义域影响
+    assert "矩形外" in q["background_range_note"]
+    assert "1500" in q["background_range_note"]
+
+
+def test_gradient_zero_slope_equals_constant_mode():
+    """验收：斜率为零且矩形覆盖采样区时，与旧常数模式逐点一致。"""
+    const = _base_payload(bg=12.0)
+    const["grid"] = {
+        "downwind_extent_m": 2000.0, "crosswind_extent_m": 1000.0,
+        "upwind_extent_m": 0.0, "nx": 21, "ny": 11,
+    }
+    zero = _gradient_payload(
+        dcd_east_ug_m3_m=0.0, dcd_north_ug_m3_m=0.0,
+        e_min_m=-5000.0, e_max_m=5000.0, n_min_m=-5000.0, n_max_m=5000.0,
+    )
+    a = client.post("/api/plume/grid", json=const).json()
+    b = client.post("/api/plume/grid", json=zero).json()
+    # 常数模式保持历史标量形状；零斜率梯度为逐格点字段，广播后须一致
+    bg_a = np.broadcast_to(
+        float(a["background_conc_ug_m3"]), (11, 21)
+    )
+    bg_b = np.array(b["background_conc_ug_m3"], dtype=float)
+    tot_a = np.array(a["total_conc_ug_m3"], dtype=float)
+    tot_b = np.array(b["total_conc_ug_m3"], dtype=float)
+    assert np.array_equal(bg_a, bg_b)
+    assert np.array_equal(tot_a, tot_b)
+
+
+def test_gradient_negative_corner_rejected():
+    """负背景（含因斜率导致的角点负值）必须 422，不截断、不外推。"""
+    payload = _gradient_payload(
+        base_ug_m3=5.0, dcd_east_ug_m3_m=-0.01, dcd_north_ug_m3_m=0.0,
+        e_min_m=0.0, e_max_m=1000.0, n_min_m=-100.0, n_max_m=100.0,
+    )
+    resp = client.post("/api/plume/grid", json=payload)
+    assert resp.status_code == 422
+    assert resp.json()["error"] == "invalid_input"
+    # 点求值同样拒绝
+    payload["points"] = [[116.4, 39.9]]
+    assert client.post("/api/plume/points", json=payload).status_code == 422
+
+
+def test_total_response_deterministic_regardless_of_plume_layer_toggle():
+    """验收：关闭烟羽图层是纯前端行为——后端总量两次请求逐位一致。"""
+    payload = _gradient_payload()
+    r1 = client.post("/api/plume/grid", json=payload).json()
+    r2 = client.post("/api/plume/grid", json=payload).json()
+    assert r1["plume_field_ug_m3"] == r2["plume_field_ug_m3"]
+    assert r1["total_conc_ug_m3"] == r2["total_conc_ug_m3"]
+    assert r1["background_conc_ug_m3"] == r2["background_conc_ug_m3"]
+
+
+def test_meta_documents_background_modes():
+    meta = client.get("/api/meta").json()["background"]
+    assert meta["default_mode"] == "constant"
+    assert "linear_rect" in meta
+    rules = " ".join(meta["linear_rect"]["rules"])
+    assert "null" in rules and "0" in rules

@@ -362,6 +362,256 @@ def check_background_separate() -> dict:
     )
 
 
+def _gradient_src_met():
+    from .schemas import MeteorologyInput, SourceInput
+
+    src = SourceInput(
+        name="梯度核对源", lon=LON0, lat=LAT0,
+        stack_height_m=H_M, emission_rate_g_s=Q_G_S,
+    )
+    met = MeteorologyInput(
+        name="梯度核对气象", wind_from_deg=270.0, wind_speed_ms=U_MS,
+        stability_class="D", background_conc_ug_m3=10.0,
+    )
+    return src, met
+
+
+def check_gradient_resolution_invariance() -> dict:
+    """梯度背景：同一物理受体点在不同网格分辨率 / 点求值下结果必须相同，
+
+    且背景值严格等于 base+dC_dE·E+dC_dN·N（网格与点共用同一坐标换算）。
+    """
+    from .schemas import (
+        BackgroundGradient,
+        GridSpec,
+        PlumeGridRequest,
+        PlumePointRequest,
+    )
+    from .services import run_grid, run_points
+
+    base, de, dn = 12.0, 0.002, -0.001
+    src, met = _gradient_src_met()
+    grad = BackgroundGradient(
+        base_ug_m3=base, dcd_east_ug_m3_m=de, dcd_north_ug_m3_m=dn,
+        e_min_m=-3000.0, e_max_m=3000.0,
+        n_min_m=-1500.0, n_max_m=1500.0,
+    )
+    grid = GridSpec(
+        downwind_extent_m=2000.0, crosswind_extent_m=1000.0,
+        upwind_extent_m=0.0,
+    )
+    # 取同一物理点（E=1000, N=0；270° 西风下即下风向 x=1000, y=0）
+    target_e, target_n = 1000.0, 0.0
+    bg_expect = base + de * target_e + dn * target_n
+
+    rows = {}
+    for nx, ny in ((21, 5), (41, 9)):
+        out = run_grid(PlumeGridRequest(
+            source=src, meteorology=met,
+            grid=GridSpec(**{**grid.model_dump(), "nx": nx, "ny": ny}),
+            background_gradient=grad,
+        ))
+        ix = (nx - 1) // 2
+        iy = (ny - 1) // 2
+        rows[(nx, ny)] = {
+            "plume": out["plume_field_ug_m3"][iy][ix],
+            "bg": out["background_conc_ug_m3"][iy][ix],
+            "total": out["total_conc_ug_m3"][iy][ix],
+        }
+
+    lon_p, lat_p = local_to_lonlat(target_e, target_n, LON0, LAT0)
+    pout = run_points(PlumePointRequest(
+        source=src, meteorology=met, grid=grid,
+        background_gradient=grad,
+        points=[[float(lon_p), float(lat_p)]],
+    ))[0]
+
+    plume_rel = abs(rows[(21, 5)]["plume"] - rows[(41, 9)]["plume"]) / max(
+        rows[(21, 5)]["plume"], 1e-30
+    )
+    bg_grid = rows[(41, 9)]["bg"]
+    bg_errs = [
+        abs(rows[(21, 5)]["bg"] - bg_expect),
+        abs(bg_grid - bg_expect),
+        abs(pout["background_conc_ug_m3"] - bg_expect),
+    ]
+    plume_point_err = abs(pout["plume_conc_ug_m3"] - rows[(41, 9)]["plume"])
+    total_ok_grid = abs(
+        rows[(41, 9)]["total"] - rows[(41, 9)]["plume"] - bg_grid
+    )
+    passed = (
+        plume_rel < 1e-12
+        and max(bg_errs) < 1e-6
+        and plume_point_err < 1e-6
+        and total_ok_grid < 1e-9
+    )
+    return _result(
+        "gradient_resolution",
+        "线性背景：分辨率无关 + 网格/点同一换算",
+        "同一受体改 nx/ny（21×5→41×9）烟羽与背景不变；背景严格等于"
+        " base+dC_dE·E+dC_dN·N；/points 与 /grid 同点一致；total=plume+bg。",
+        passed,
+        f"bg={bg_expect:.4f}；各路径一致；分辨率相对差 0",
+        f"bg 最大偏差 {max(bg_errs):.2e}；烟羽分辨率相对差 {plume_rel:.2e}；"
+        f"点-网格烟羽差 {plume_point_err:.2e}；total 偏差 {total_ok_grid:.2e}",
+        1e-9,
+        {
+            "expected_bg_ug_m3": bg_expect,
+            "grid_rows": {f"{k[0]}x{k[1]}": v for k, v in rows.items()},
+            "point": {
+                "bg": pout["background_conc_ug_m3"],
+                "total": pout["total_conc_ug_m3"],
+                "in_domain": pout["background_in_domain"],
+            },
+        },
+    )
+
+
+def check_gradient_zero_slope_matches_constant() -> dict:
+    """斜率全零时线性梯度模式必须与旧常数模式逐点一致（矩形内）。"""
+    from .schemas import BackgroundGradient, GridSpec, PlumeGridRequest
+    from .services import run_grid
+
+    src, met = _gradient_src_met()
+    base = met.background_conc_ug_m3
+    const_out = run_grid(PlumeGridRequest(
+        source=src, meteorology=met,
+        grid=GridSpec(downwind_extent_m=2000.0, crosswind_extent_m=1000.0,
+                      upwind_extent_m=0.0, nx=25, ny=11),
+    ))
+    grad_out = run_grid(PlumeGridRequest(
+        source=src, meteorology=met,
+        grid=GridSpec(downwind_extent_m=2000.0, crosswind_extent_m=1000.0,
+                      upwind_extent_m=0.0, nx=25, ny=11),
+        background_gradient=BackgroundGradient(
+            base_ug_m3=base,
+            dcd_east_ug_m3_m=0.0, dcd_north_ug_m3_m=0.0,
+            e_min_m=-5000.0, e_max_m=5000.0,
+            n_min_m=-5000.0, n_max_m=5000.0,
+        ),
+    ))
+    c_bg = np.array(const_out["background_conc_ug_m3"], dtype=float)
+    g_bg = np.array(grad_out["background_conc_ug_m3"], dtype=float)
+    c_tot = np.array(const_out["total_conc_ug_m3"], dtype=float)
+    g_tot = np.array(grad_out["total_conc_ug_m3"], dtype=float)
+    bg_err = float(np.max(np.abs(c_bg - g_bg)))
+    tot_err = float(np.max(np.abs(c_tot - g_tot)))
+    return _result(
+        "gradient_zero_slope",
+        "梯度为零 ⇔ 旧常数背景模式",
+        "斜率全为 0、矩形覆盖采样范围时，线性背景与空间常数背景"
+        "的 background/total 逐点相同。",
+        bg_err < 1e-12 and tot_err < 1e-12,
+        "逐点偏差 0",
+        f"background 最大偏差 {bg_err:.2e}；total 最大偏差 {tot_err:.2e}",
+        1e-12,
+        {"base_ug_m3": base},
+    )
+
+
+def check_gradient_outside_rect() -> dict:
+    """矩形外：不外推——网格为 null 并计数，点求值给范围提示；负角点被拒。"""
+    from .schemas import (
+        BackgroundGradient,
+        GridSpec,
+        PlumeGridRequest,
+        PlumePointRequest,
+    )
+    from .gaussian import PlumeInputError
+    from .services import run_grid, run_points
+
+    src, met = _gradient_src_met()
+    grad = BackgroundGradient(
+        base_ug_m3=10.0, dcd_east_ug_m3_m=0.002, dcd_north_ug_m3_m=0.0,
+        e_min_m=0.0, e_max_m=800.0, n_min_m=-300.0, n_max_m=300.0,
+    )
+    req = PlumeGridRequest(
+        source=src, meteorology=met,
+        grid=GridSpec(downwind_extent_m=2000.0, crosswind_extent_m=1000.0,
+                      upwind_extent_m=0.0, nx=21, ny=11),
+        background_gradient=grad,
+    )
+    out = run_grid(req)
+    bg = out["background_conc_ug_m3"]
+    total = out["total_conc_ug_m3"]
+    n_out = out["diagnostics"]["n_background_outside_rect_cells"]
+    has_null = any(v is None for row in bg for v in row)
+    total_null_matches = all(
+        (bg[i][j] is None) == (total[i][j] is None)
+        for i in range(len(bg)) for j in range(len(bg[0]))
+    )
+    # 矩形内仍严格 total=plume+bg
+    inside_ok = all(
+        abs(total[i][j] - out["plume_field_ug_m3"][i][j] - bg[i][j]) < 1e-9
+        for i in range(len(bg)) for j in range(len(bg[0]))
+        if bg[i][j] is not None
+    )
+
+    # 点求值：矩形外（E=2000, N=0）
+    lon_out, lat_out = local_to_lonlat(2000.0, 0.0, LON0, LAT0)
+    lon_in, lat_in = local_to_lonlat(400.0, 0.0, LON0, LAT0)
+    pts = run_points(PlumePointRequest(
+        source=src, meteorology=met,
+        grid=GridSpec(downwind_extent_m=2000.0, crosswind_extent_m=1000.0,
+                      upwind_extent_m=0.0, nx=21, ny=11),
+        background_gradient=grad,
+        points=[[float(lon_in), float(lat_in)],
+                [float(lon_out), float(lat_out)]],
+    ))
+    p_in, p_out = pts
+    point_outside_ok = (
+        p_in["background_in_domain"] is True
+        and abs(p_in["background_conc_ug_m3"] - 10.8) < 1e-9
+        and p_out["background_in_domain"] is False
+        and p_out["background_conc_ug_m3"] is None
+        and p_out["total_conc_ug_m3"] is None
+        and p_out["plume_conc_ug_m3"] >= 0.0
+        and "矩形外" in p_out["background_range_note"]
+    )
+
+    # 负背景：base 非负但东端角点为负 → 必须拒绝
+    rejected = False
+    try:
+        run_grid(PlumeGridRequest(
+            source=src, meteorology=met,
+            grid=GridSpec(nx=11, ny=11),
+            background_gradient=BackgroundGradient(
+                base_ug_m3=5.0, dcd_east_ug_m3_m=-0.01,
+                dcd_north_ug_m3_m=0.0,
+                e_min_m=0.0, e_max_m=1000.0,
+                n_min_m=-100.0, n_max_m=100.0,
+            ),
+        ))
+    except PlumeInputError:
+        rejected = True
+
+    passed = (
+        has_null and n_out > 0 and total_null_matches
+        and inside_ok and point_outside_ok and rejected
+    )
+    return _result(
+        "gradient_outside_rect",
+        "线性背景：矩形外不外推、负背景被拒",
+        "矩形外网格背景/总量为 null（不悄悄外推）并计数；点求值返回"
+        " in_domain=false 与明确范围提示，烟羽仍返回；矩形四角出现负背景"
+        "必须 422 拒绝。",
+        passed,
+        "界外 null+提示；界内 total=plume+bg；负角点拒绝",
+        f"网格界外 {n_out} 格，null 存在={has_null}，点提示='{p_out['background_range_note'][:40]}…'，"
+        f"负背景已拒绝={rejected}",
+        None,
+        {
+            "n_outside_cells": n_out,
+            "inside_point_bg": p_in["background_conc_ug_m3"],
+            "outside_point": {
+                "bg": p_out["background_conc_ug_m3"],
+                "total": p_out["total_conc_ug_m3"],
+                "plume": p_out["plume_conc_ug_m3"],
+            },
+        },
+    )
+
+
 ALL_CHECKS = [
     check_crosswind_symmetry,
     check_crosswind_gaussian_ratio,
@@ -373,6 +623,9 @@ ALL_CHECKS = [
     check_calm_wind,
     check_resolution_independence,
     check_background_separate,
+    check_gradient_resolution_invariance,
+    check_gradient_zero_slope_matches_constant,
+    check_gradient_outside_rect,
 ]
 
 
