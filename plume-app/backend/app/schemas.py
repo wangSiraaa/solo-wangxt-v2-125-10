@@ -8,9 +8,10 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .dispersion import STABILITY_CLASSES
 
@@ -68,6 +69,51 @@ class MetOverride(BaseModel):
     background_conc_ug_m3: float | None = Field(None, ge=0.0)
 
 
+class BackgroundGradientInput(BaseModel):
+    """单次情景的线性背景梯度（仅在有限矩形内有效，不外推）。
+
+    bg(E, N) = base + slope_east·E/1000 + slope_north·N/1000，
+    (E, N) 为以源为原点的局部平面坐标（米），与网格/受体点同一换算。
+    斜率为 0 时退化为空间常数背景，与旧模式逐点一致。
+    """
+
+    base_value_ug_m3: float = Field(
+        ..., ge=0.0, description="源点 (E=0, N=0) 处基准背景 μg/m³"
+    )
+    slope_east_ug_m3_per_km: float = Field(0.0, description="东向斜率 μg/m³/km")
+    slope_north_ug_m3_per_km: float = Field(0.0, description="北向斜率 μg/m³/km")
+    east_min_m: float = Field(
+        ..., ge=-1_000_000.0, le=1_000_000.0, description="矩形西界（局部 E，米）"
+    )
+    east_max_m: float = Field(
+        ..., ge=-1_000_000.0, le=1_000_000.0, description="矩形东界（局部 E，米）"
+    )
+    north_min_m: float = Field(
+        ..., ge=-1_000_000.0, le=1_000_000.0, description="矩形南界（局部 N，米）"
+    )
+    north_max_m: float = Field(
+        ..., ge=-1_000_000.0, le=1_000_000.0, description="矩形北界（局部 N，米）"
+    )
+
+    @model_validator(mode="after")
+    def _check_rect(self):
+        for lo, hi, axis in (
+            (self.east_min_m, self.east_max_m, "E"),
+            (self.north_min_m, self.north_max_m, "N"),
+        ):
+            if not lo < hi:
+                raise ValueError(
+                    f"背景矩形 {axis} 向边界必须满足 min < max（收到 {lo} ≥ {hi}）"
+                )
+        for v in (
+            self.slope_east_ug_m3_per_km,
+            self.slope_north_ug_m3_per_km,
+        ):
+            if not math.isfinite(v):
+                raise ValueError("背景斜率必须为有限值")
+        return self
+
+
 class GridSpec(BaseModel):
     """采样网格规范（仅描述如何采样，不改变任何模型输入）。"""
 
@@ -92,16 +138,27 @@ class PlumeGridRequest(BaseModel):
         description="power_law 参数: ay, py, az, pz（均为正）",
     )
     calm_threshold_ms: float = Field(1.0, gt=0.0, le=5.0)
+    background_gradient: BackgroundGradientInput | None = Field(
+        None,
+        description="可选线性背景梯度；缺省为空间常数背景（旧行为）",
+    )
 
 
 class PlumeGridResponse(BaseModel):
-    """结果：烟羽、背景、总量分开；网格角点显式给出，避免任何精度暗示。"""
+    """结果：烟羽、背景、总量分开；网格角点显式给出，避免任何精度暗示。
+
+    background_mode="constant" 时 background_conc_ug_m3 为全场景常数；
+    "linear_gradient" 时该字段为源点基准值，空间场见 background_field_ug_m3。
+    """
 
     source_lonlat: tuple[float, float]
     crs_note: str
     grid: dict
     plume_field_ug_m3: list[list[float]]
+    background_mode: Literal["constant", "linear_gradient"] = "constant"
     background_conc_ug_m3: float
+    background_field_ug_m3: list[list[float]] | None = None
+    background_detail: dict | None = None
     total_conc_ug_m3: list[list[float]]
     iso_levels_ug_m3: list[float]
     effective_stack_height_m: float

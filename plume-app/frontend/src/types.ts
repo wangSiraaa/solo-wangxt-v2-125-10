@@ -30,6 +30,33 @@ export interface GridSpec {
   ny: number
 }
 
+/** 单次情景的线性背景梯度（有限矩形内有效，不外推）。 */
+export interface BackgroundGradientInput {
+  base_value_ug_m3: number
+  slope_east_ug_m3_per_km: number
+  slope_north_ug_m3_per_km: number
+  east_min_m: number
+  east_max_m: number
+  north_min_m: number
+  north_max_m: number
+}
+
+export interface BackgroundGradientDetail {
+  base_value_ug_m3: number
+  slope_east_ug_m3_per_km: number
+  slope_north_ug_m3_per_km: number
+  rect_east_north_m: {
+    east_min_m: number
+    east_max_m: number
+    north_min_m: number
+    north_max_m: number
+  }
+  rect_corners_lonlat: [number, number][]
+  grid_background_min_ug_m3: number
+  grid_background_max_ug_m3: number
+  note: string
+}
+
 export interface SourceRow extends SourceInput {
   id: number
 }
@@ -57,7 +84,10 @@ export interface PlumeGridResponse {
     resolution_disclaimer: string
   }
   plume_field_ug_m3: number[][]
+  background_mode: 'constant' | 'linear_gradient'
   background_conc_ug_m3: number
+  background_field_ug_m3: number[][] | null
+  background_detail: BackgroundGradientDetail | null
   total_conc_ug_m3: number[][]
   iso_levels_ug_m3: number[]
   effective_stack_height_m: number
@@ -89,6 +119,7 @@ export interface PlumeGridRequest {
   parameterization: 'briggs_rural' | 'power_law'
   power_law?: { ay: number; py: number; az: number; pz: number } | null
   calm_threshold_ms: number
+  background_gradient?: BackgroundGradientInput | null
 }
 
 export interface CheckResult {

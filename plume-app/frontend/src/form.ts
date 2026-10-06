@@ -12,6 +12,13 @@ export interface FormState {
   ambientT: number
   pressure: number
   background: number
+  bgGradient: boolean
+  bgSlopeEast: number
+  bgSlopeNorth: number
+  bgRectEmin: number
+  bgRectEmax: number
+  bgRectNmin: number
+  bgRectNmax: number
   useRise: boolean
   parameterization: 'briggs_rural' | 'power_law'
   ay: number
@@ -40,6 +47,13 @@ export const DEFAULT_FORM: FormState = {
   ambientT: 293.15,
   pressure: 1013,
   background: 15,
+  bgGradient: false,
+  bgSlopeEast: 1,
+  bgSlopeNorth: 0,
+  bgRectEmin: -10000,
+  bgRectEmax: 10000,
+  bgRectNmin: -10000,
+  bgRectNmax: 10000,
   useRise: false,
   parameterization: 'briggs_rural',
   ay: 0.22,

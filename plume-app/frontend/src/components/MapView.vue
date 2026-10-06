@@ -7,7 +7,7 @@ import {
   marchingSquares,
   samplingBoundary,
 } from '../marching'
-import { makeColorFor } from '../colors'
+import { makeBgColorFor, makeColorFor } from '../colors'
 
 const props = defineProps<{
   result: PlumeGridResponse | null
@@ -78,8 +78,16 @@ onMounted(() => {
       layout: { visibility: 'none' },
       paint: {
         'fill-color': ['get', 'color'],
-        'fill-opacity': 0.16,
+        'fill-opacity': ['coalesce', ['get', 'opacity'], 0.16],
       },
+    })
+    // 背景梯度有效矩形（蓝虚线）：梯度模式下的背景定义域
+    map!.addSource('bgrect', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map!.addLayer({
+      id: 'bgrect-line',
+      type: 'line',
+      source: 'bgrect',
+      paint: { 'line-color': '#2563eb', 'line-width': 1.4, 'line-dasharray': [2, 2] },
     })
     map!.addSource('fill', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map!.addLayer({
@@ -168,7 +176,10 @@ function onMouseMove(e: maplibregl.MapMouseEvent) {
       lat,
       plume: r.plume_field_ug_m3[br][bc],
       total: r.total_conc_ug_m3[br][bc],
-      bg: r.background_conc_ug_m3,
+      bg:
+        r.background_mode === 'linear_gradient' && r.background_field_ug_m3
+          ? r.background_field_ug_m3[br][bc]
+          : r.background_conc_ug_m3,
       xm: r.grid.x_edges_m[bc],
       ym: r.grid.y_edges_m[br],
     }
@@ -243,28 +254,68 @@ function render(r: PlumeGridResponse) {
     : { type: 'FeatureCollection' as const, features: [] }
   ;(map.getSource('fill') as maplibregl.GeoJSONSource).setData(fillFC as any)
 
-  // 背景值叠加：采样矩形内均匀单层，灰蓝色，只表示空间常数背景
-  const bgFC =
-    props.showBg && r.background_conc_ug_m3 > 0
-      ? {
-          type: 'FeatureCollection' as const,
-          features: [
-            {
-              type: 'Feature' as const,
-              properties: {
-                color: '#2563eb',
-                bg: r.background_conc_ug_m3,
-              },
-              geometry: samplingBoundary(r.grid.corners_lonlat).geometry,
-            },
-          ],
-        }
-      : { type: 'FeatureCollection' as const, features: [] }
+  // 背景图层：常数模式为采样矩形内均匀单层；梯度模式为逐格蓝色填色，
+  // 两种模式都只表示背景，与烟羽贡献严格分开（总量由后端计算，不受图层开关影响）
+  const gradDetail =
+    r.background_mode === 'linear_gradient' ? r.background_detail : null
+  let bgFC: GeoJSON.FeatureCollection
+  if (!props.showBg) {
+    bgFC = { type: 'FeatureCollection', features: [] }
+  } else if (gradDetail && r.background_field_ug_m3) {
+    const fc = gridFillPolygons(
+      r.background_field_ug_m3,
+      r.grid.lon_grid,
+      r.grid.lat_grid,
+      makeBgColorFor(
+        gradDetail.grid_background_min_ug_m3,
+        gradDetail.grid_background_max_ug_m3,
+      ),
+      -Infinity,
+    )
+    for (const f of fc.features) f.properties!.opacity = 1
+    bgFC = fc
+  } else if (!gradDetail && r.background_conc_ug_m3 > 0) {
+    bgFC = {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            color: '#2563eb',
+            bg: r.background_conc_ug_m3,
+          },
+          geometry: samplingBoundary(r.grid.corners_lonlat).geometry,
+        },
+      ],
+    }
+  } else {
+    bgFC = { type: 'FeatureCollection', features: [] }
+  }
   ;(map.getSource('bgval') as maplibregl.GeoJSONSource).setData(bgFC as any)
   map!.setLayoutProperty(
     'bgval-layer',
     'visibility',
     props.showBg ? 'visible' : 'none',
+  )
+
+  // 背景梯度有效矩形（蓝虚线）：梯度模式下始终标示背景定义域
+  const rectCorners = gradDetail?.rect_corners_lonlat
+  ;(map.getSource('bgrect') as maplibregl.GeoJSONSource).setData(
+    rectCorners
+      ? {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: { kind: 'background-gradient-rect' },
+              geometry: {
+                type: 'Polygon',
+                coordinates: [[...rectCorners, rectCorners[0]]],
+              },
+            },
+          ],
+        }
+      : { type: 'FeatureCollection', features: [] },
   )
 
   // 等值线永远是“烟羽贡献”等值线
@@ -316,7 +367,7 @@ function render(r: PlumeGridResponse) {
 function clearMap() {
   if (!map || !map.getSource('fill')) return
   const empty = { type: 'FeatureCollection' as const, features: [] }
-  for (const id of ['fill', 'iso', 'bgval', 'boundary', 'wind']) {
+  for (const id of ['fill', 'iso', 'bgval', 'bgrect', 'boundary', 'wind']) {
     ;(map.getSource(id) as maplibregl.GeoJSONSource).setData(empty as any)
   }
   sourceMarker?.remove()

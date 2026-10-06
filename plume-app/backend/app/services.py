@@ -6,6 +6,11 @@ import math
 import numpy as np
 
 from .config import settings
+from .background import (
+    gradient_background_field,
+    gradient_background_point,
+    gradient_rect_corners_lonlat,
+)
 from .dispersion import STABILITY_CLASSES, parameterization_metadata
 from .gaussian import CalmWindError, PlumeInputError, compute_plume_field
 from .geometry import (
@@ -168,8 +173,37 @@ def run_grid(req: PlumeGridRequest) -> dict:
         calm_threshold_ms=req.calm_threshold_ms,
     )
     plume = result["field"]
-    bg = met.background_conc_ug_m3
-    total = plume + bg
+    grad = req.background_gradient
+    if grad is None:
+        # 默认：空间常数背景（旧行为，逐字节不变）
+        background_mode = "constant"
+        bg_field = None
+        bg_scalar = met.background_conc_ug_m3
+        bg_detail = None
+        total = plume + bg_scalar
+    else:
+        # 线性背景梯度：与受体点求值共用同一 (E, N) 局部坐标
+        background_mode = "linear_gradient"
+        bg_field = gradient_background_field(grad, grid["east_m"], grid["north_m"])
+        bg_scalar = grad.base_value_ug_m3
+        bg_detail = {
+            "base_value_ug_m3": grad.base_value_ug_m3,
+            "slope_east_ug_m3_per_km": grad.slope_east_ug_m3_per_km,
+            "slope_north_ug_m3_per_km": grad.slope_north_ug_m3_per_km,
+            "rect_east_north_m": {
+                "east_min_m": grad.east_min_m,
+                "east_max_m": grad.east_max_m,
+                "north_min_m": grad.north_min_m,
+                "north_max_m": grad.north_max_m,
+            },
+            "rect_corners_lonlat": gradient_rect_corners_lonlat(
+                grad, src.lon, src.lat
+            ),
+            "grid_background_min_ug_m3": float(bg_field.min()),
+            "grid_background_max_ug_m3": float(bg_field.max()),
+            "note": "线性背景仅在上述矩形内评估；矩形外不计算、不外推。",
+        }
+        total = plume + bg_field
 
     return {
         "source_lonlat": [src.lon, src.lat],
@@ -202,7 +236,12 @@ def run_grid(req: PlumeGridRequest) -> dict:
             ),
         },
         "plume_field_ug_m3": plume.tolist(),
-        "background_conc_ug_m3": float(bg),
+        "background_mode": background_mode,
+        "background_conc_ug_m3": float(bg_scalar),
+        "background_field_ug_m3": (
+            bg_field.tolist() if bg_field is not None else None
+        ),
+        "background_detail": bg_detail,
         "total_conc_ug_m3": total.tolist(),
         "iso_levels_ug_m3": iso_levels(float(plume.max())),
         "effective_stack_height_m": float(h_eff),
@@ -242,9 +281,14 @@ def run_grid(req: PlumeGridRequest) -> dict:
 
 
 def run_points(req: "PlumePointRequest") -> list[dict]:
-    """在任意经纬度点上求值（核对用），与采样网格完全无关。"""
+    """在任意经纬度点上求值（核对用），与采样网格完全无关。
+
+    背景与网格走同一 (E, N) 局部坐标换算；梯度模式下矩形外的点
+    不外推——背景与总量返回 None 并附明确范围说明。
+    """
     src, met = merge_overrides(req)
     h_eff, rise_detail = effective_height(src, met, req.plume_rise.use_plume_rise)
+    grad = req.background_gradient
     out = []
     for lon, lat in req.points:
         e, n = lonlat_to_local(lon, lat, src.lon, src.lat)
@@ -265,14 +309,25 @@ def run_points(req: "PlumePointRequest") -> list[dict]:
         x = float(result["x_downwind_m"][0, 0])
         y = float(result["y_crosswind_m"][0, 0])
         plume = float(result["field"][0, 0])
+        if grad is None:
+            bg_val: float | None = met.background_conc_ug_m3
+            bg_note = None
+        else:
+            bg_val, bg_note = gradient_background_point(grad, e, n)
         out.append(
             {
                 "lonlat": [lon, lat],
                 "east_north_m": [e, n],
                 "downwind_crosswind_m": [x, y],
                 "plume_conc_ug_m3": plume,
-                "background_conc_ug_m3": met.background_conc_ug_m3,
-                "total_conc_ug_m3": plume + met.background_conc_ug_m3,
+                "background_mode": (
+                    "constant" if grad is None else "linear_gradient"
+                ),
+                "background_conc_ug_m3": bg_val,
+                "background_note": bg_note,
+                "total_conc_ug_m3": (
+                    None if bg_val is None else plume + bg_val
+                ),
                 "sigma_y_m": float(result["sigma_y_m"][0, 0]),
                 "sigma_z_m": float(result["sigma_z_m"][0, 0]),
             }

@@ -78,8 +78,23 @@ function fmt(v: number, d = 2) {
           <dl class="kv">
             <dt>烟羽贡献 最大值</dt>
             <dd><b>{{ fmt(result.diagnostics.max_plume_conc_ug_m3) }}</b></dd>
-            <dt>背景浓度（空间常数）</dt>
-            <dd>{{ fmt(result.background_conc_ug_m3) }}</dd>
+            <template v-if="result.background_mode === 'linear_gradient' && result.background_detail">
+              <dt>背景（线性梯度）</dt>
+              <dd>
+                {{ fmt(result.background_detail.grid_background_min_ug_m3) }}–
+                {{ fmt(result.background_detail.grid_background_max_ug_m3) }}
+                <span class="muted">（源点基准 {{ fmt(result.background_detail.base_value_ug_m3) }}）</span>
+              </dd>
+              <dt>背景斜率 东/北</dt>
+              <dd>
+                {{ result.background_detail.slope_east_ug_m3_per_km }} /
+                {{ result.background_detail.slope_north_ug_m3_per_km }} μg/m³/km
+              </dd>
+            </template>
+            <template v-else>
+              <dt>背景浓度（空间常数）</dt>
+              <dd>{{ fmt(result.background_conc_ug_m3) }}</dd>
+            </template>
             <dt>总浓度 最大值</dt>
             <dd>
               {{
@@ -91,6 +106,13 @@ function fmt(v: number, d = 2) {
           </dl>
           <div class="muted" style="font-size:11px;margin-top:4px">
             总量 = 烟羽贡献 + 背景值；三者分别返回。
+            <template v-if="result.background_mode === 'linear_gradient' && result.background_detail">
+              背景仅在矩形 E∈[{{ result.background_detail.rect_east_north_m.east_min_m }},
+              {{ result.background_detail.rect_east_north_m.east_max_m }}] m、
+              N∈[{{ result.background_detail.rect_east_north_m.north_min_m }},
+              {{ result.background_detail.rect_east_north_m.north_max_m }}] m
+              （相对源点）内评估，矩形外不计算、不外推。
+            </template>
           </div>
         </div>
 

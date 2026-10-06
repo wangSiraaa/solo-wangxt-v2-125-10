@@ -106,6 +106,17 @@ def meta():
             "default_threshold_ms": settings.default_calm_threshold_ms,
             "behavior": "低于阈值返回 422 calm_wind，拒绝硬算",
         },
+        "background": {
+            "default_mode": "constant（空间常数，单次情景可改用线性梯度）",
+            "linear_gradient": {
+                "formula": "bg(E,N) = base + slope_east·E/1000 + slope_north·N/1000",
+                "coords": "E/N 为以源为原点的局部平面米坐标（网格与受体点同一 lonlat_to_local 换算）",
+                "domain": "仅在请求指定的矩形 [east_min,east_max]×[north_min,north_max] 内有效；"
+                "网格越界 → 422 拒绝；受体点越界 → 该点背景/总量为 null 并附说明；均不外推",
+                "negative": "矩形内任一点背景 < 0 → 422（网格）或逐点标注（点求值），不截断为 0",
+                "zero_slope": "斜率为 0 时与常数背景逐点一致",
+            },
+        },
         "stability_classes": [
             {"class": s, **STABILITY_DESCRIPTIONS[s]} for s in STABILITY_CLASSES
         ],

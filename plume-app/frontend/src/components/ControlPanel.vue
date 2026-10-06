@@ -133,6 +133,41 @@ const isCalm = computed(() => props.form.windSpeed < props.form.calmThreshold)
         <input data-test="background" type="range" min="0" max="100" step="0.5" :value="form.background"
           @input="patch({ background: Number(($event.target as HTMLInputElement).value) })" />
       </label>
+      <details class="params">
+        <summary>背景空间梯度（可选：有限矩形内线性变化）</summary>
+        <div class="toggle">
+          <input data-test="bg-gradient" type="checkbox" :checked="form.bgGradient"
+            @change="patch({ bgGradient: ($event.target as HTMLInputElement).checked })" />
+          启用线性背景梯度（基准值＝上方背景浓度，位于源点）
+        </div>
+        <template v-if="form.bgGradient">
+          <div class="row2">
+            <label class="field"><span class="lbl">东向斜率（μg/m³/km）</span>
+              <input class="num" data-test="bg-slope-east" type="number" step="0.1" :value="form.bgSlopeEast"
+                @input="patch({ bgSlopeEast: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label class="field"><span class="lbl">北向斜率（μg/m³/km）</span>
+              <input class="num" type="number" step="0.1" :value="form.bgSlopeNorth"
+                @input="patch({ bgSlopeNorth: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label class="field"><span class="lbl">矩形西界 E（m，相对源点）</span>
+              <input class="num" type="number" step="500" :value="form.bgRectEmin"
+                @input="patch({ bgRectEmin: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label class="field"><span class="lbl">矩形东界 E（m）</span>
+              <input class="num" type="number" step="500" :value="form.bgRectEmax"
+                @input="patch({ bgRectEmax: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label class="field"><span class="lbl">矩形南界 N（m）</span>
+              <input class="num" type="number" step="500" :value="form.bgRectNmin"
+                @input="patch({ bgRectNmin: Number(($event.target as HTMLInputElement).value) })" /></label>
+            <label class="field"><span class="lbl">矩形北界 N（m）</span>
+              <input class="num" type="number" step="500" :value="form.bgRectNmax"
+                @input="patch({ bgRectNmax: Number(($event.target as HTMLInputElement).value) })" /></label>
+          </div>
+          <div class="muted" style="font-size:11px">
+            背景仅在矩形内评估：采样网格超出矩形或矩形内出现负背景时，
+            后端拒绝计算并明确提示（不外推、不截断）；
+            斜率为 0 时与常数背景完全一致。
+          </div>
+        </template>
+      </details>
     </div>
 
     <div class="section">

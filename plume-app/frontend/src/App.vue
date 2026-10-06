@@ -10,7 +10,7 @@ import type {
   PlumeGridResponse,
   SourceRow,
 } from './types'
-import { legendStops } from './colors'
+import { bgLegendStops, legendStops } from './colors'
 
 const sources = ref<SourceRow[]>([])
 const meteorology = ref<MetRow[]>([])
@@ -130,6 +130,17 @@ async function run() {
           ? { ay: form.value.ay, py: form.value.py, az: form.value.az, pz: form.value.pz }
           : null,
       calm_threshold_ms: form.value.calmThreshold,
+      background_gradient: form.value.bgGradient
+        ? {
+            base_value_ug_m3: form.value.background,
+            slope_east_ug_m3_per_km: form.value.bgSlopeEast,
+            slope_north_ug_m3_per_km: form.value.bgSlopeNorth,
+            east_min_m: form.value.bgRectEmin,
+            east_max_m: form.value.bgRectEmax,
+            north_min_m: form.value.bgRectNmin,
+            north_max_m: form.value.bgRectNmax,
+          }
+        : null,
     })
   } catch (e: any) {
     result.value = null
@@ -146,6 +157,15 @@ async function run() {
 const stops = computed(() =>
   result.value ? legendStops(result.value.iso_levels_ug_m3) : [],
 )
+const bgStops = computed(() => {
+  const d = result.value?.background_detail
+  if (!d) return []
+  return bgLegendStops(
+    d.grid_background_min_ug_m3,
+    d.grid_background_max_ug_m3,
+    5,
+  )
+})
 </script>
 
 <template>
@@ -202,8 +222,32 @@ const stops = computed(() =>
           </label>
           <label class="toggle" style="margin:2px 0">
             <input type="checkbox" v-model="showBg" />
-            背景值叠加（均匀 {{ result.background_conc_ug_m3 }} μg/m³）
+            <template v-if="result.background_mode === 'linear_gradient'">
+              背景图层（线性梯度，矩形内有效）
+            </template>
+            <template v-else>
+              背景值叠加（均匀 {{ result.background_conc_ug_m3 }} μg/m³）
+            </template>
           </label>
+          <template v-if="result.background_mode === 'linear_gradient' && result.background_detail && bgStops.length">
+            <div class="bar">
+              <span
+                v-for="(s, i) in bgStops"
+                :key="i"
+                :style="{ flex: 1, background: s.color }"
+              />
+            </div>
+            <div class="labels">
+              <span>{{ bgStops[0].value.toFixed(1) }}</span>
+              <span>{{ bgStops[bgStops.length - 1].value.toFixed(1) }}</span>
+            </div>
+            <div class="muted" style="font-size:10px">
+              背景 μg/m³ ＝ {{ result.background_detail.base_value_ug_m3 }}（源点）
+              ＋ {{ result.background_detail.slope_east_ug_m3_per_km }}/km·E
+              ＋ {{ result.background_detail.slope_north_ug_m3_per_km }}/km·N；
+              蓝虚线矩形外不评估
+            </div>
+          </template>
           <div class="muted" style="font-size:10px;margin-top:2px">
             总浓度＝烟羽贡献＋背景值，见右侧结果分解与悬停读数
           </div>

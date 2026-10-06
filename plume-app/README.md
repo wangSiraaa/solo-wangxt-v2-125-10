@@ -87,9 +87,17 @@ C(x,y,0) = Q / (π·u·σy·σz) · exp(−y²/(2σy²)) · exp(−He²/(2σz²)
    - `GET /api/plume/wind-check?wind_from_deg=270` 返回输运方位角、
      下风向/横风向单位向量、正交性 d·c≈0 与 |d|=1 的核对值；
      前端有独立“风向换算检查”页签。
-3. **浓度三部分严格分开**：`plume_field`（烟羽贡献）、
-   `background_conc`（空间常数背景）、`total = plume + background` 分别返回；
-   地图上烟羽热图与均匀背景层是**两个可独立开关的图层**。
+3. **浓度三部分严格分开**：`plume_field`（烟羽贡献）、背景、
+   `total = plume + background` 分别返回；
+   地图上烟羽热图与背景层是**两个可独立开关的图层**
+   （图层开关只影响渲染，总量始终由后端计算）。
+   背景默认为空间常数；单次情景可改用**有限矩形内的线性梯度**
+   （`background_gradient`：源点基准值 + 东/北向斜率 μg/m³/km +
+   以源为原点的局部平面矩形界）。网格与任意受体点共用同一
+   `lonlat_to_local` 换算求背景，故背景值与网格分辨率无关；
+   斜率为 0 时与常数模式逐点一致。矩形外**不外推**：
+   网格越界或矩形内出现负背景 → `422` 拒绝；
+   受体点越界 → 该点背景/总量为 `null` 并附范围说明。
 4. **源项独立展示**：烟囱几何高、Δh、有效源高、Q、烟温等在右侧面板分项列出。
 5. **网格分辨率只改变采样**：源/气象输入是独立对象，
    界面调整通过 override 合并、不改数据库；改 nx/ny 不改变任何物理输入，
@@ -113,11 +121,14 @@ C(x,y,0) = Q / (π·u·σy·σz) · exp(−y²/(2σy²)) · exp(−He²/(2σz²)
 | 静风拦截 | u=0.3 m/s 必须抛 CalmWindError |
 | 分辨率无关 | 粗/细网格在同一物理格点浓度相同 |
 | 背景分开 | total = plume + bg 处处成立 |
+| 背景梯度线性 | 受体点 bg = base + 东斜率·E + 北斜率·N 严格线性；同一受体背景值与网格分辨率无关 |
+| 零梯度 ≡ 常数 | 斜率全 0 时总量数组与常数模式逐元素完全相同 |
+| 梯度边界显式处理 | 网格越界/负背景 → 拒绝；矩形外受体点 → null + 范围说明，不外推 |
 
 运行后端测试：
 
 ```bash
-cd backend && python3 -m pytest tests/ -q     # 9 passed
+cd backend && python3 -m pytest tests/ -q     # 17 passed
 ```
 
 前端工具：
@@ -127,6 +138,7 @@ cd frontend
 npm run build                  # vue-tsc 类型检查 + vite 构建
 npx tsx scripts/smoke-contours.ts   # marching squares 数值冒烟
 npx tsx scripts/e2e.ts              # 需 Playwright Chromium：渲染/静风/核对
+npx tsx scripts/e2e-bg-gradient.ts  # 背景梯度：图层/图例/越界报错
 ```
 
 ## 5. API 一览
@@ -140,7 +152,7 @@ POST /api/plume/grid             采样网格浓度（烟羽/背景/总量分开
 POST /api/plume/points           任意经纬度点求值（核对用）
 GET  /api/plume/wind-check       风向↔坐标换算检查
 POST /api/plume/rise             Holland 抬升明细
-GET  /api/checks                 10 条解析核对
+GET  /api/checks                 13 条解析核对
 ```
 
 交互文档：http://localhost:8000/docs 。
@@ -152,8 +164,9 @@ backend/app/
   gaussian.py       高斯主公式 + CalmWindError（静风硬拦截）
   dispersion.py     Briggs/幂律弥散系数，显式系数与适用范围
   geometry.py       风向、E/N 平面、经纬度换算（含单位向量核对）
+  background.py     背景场：常数（默认）/ 有限矩形内线性梯度（不外推）
   plume_rise.py     Holland 抬升
-  checks.py         10 条解析核对（API 与 pytest 共用）
+  checks.py         13 条解析核对（API 与 pytest 共用）
   services.py       网格构造、override 合并、等值级、响应组装
   repository.py     PostGIS 仓储 / 内存回退
 frontend/src/

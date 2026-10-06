@@ -135,3 +135,146 @@ def test_power_law_peak_location_analytic():
     x = data["grid"]["x_edges_m"][ix]
     expected = 60.0 / (math.sqrt(2) * 0.16)
     assert abs(x - expected) / expected < 0.02
+
+
+# ---------- 线性背景梯度 ----------
+
+
+def _gradient_payload(**grad_kw):
+    """默认梯度：基准 10，东斜率 2 μg/m³/km，矩形 ±20 km 覆盖默认网格。"""
+    p = _base_payload()
+    p["background_gradient"] = {
+        "base_value_ug_m3": 10.0,
+        "slope_east_ug_m3_per_km": 2.0,
+        "slope_north_ug_m3_per_km": 0.0,
+        "east_min_m": -20_000.0,
+        "east_max_m": 20_000.0,
+        "north_min_m": -20_000.0,
+        "north_max_m": 20_000.0,
+        **grad_kw,
+    }
+    return p
+
+
+def test_default_scenario_stays_constant_mode():
+    """不带 background_gradient 的请求必须保持旧常数行为。"""
+    resp = client.post("/api/plume/grid", json=_base_payload())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["background_mode"] == "constant"
+    assert data["background_field_ug_m3"] is None
+    assert data["background_detail"] is None
+    total = np.array(data["total_conc_ug_m3"])
+    plume = np.array(data["plume_field_ug_m3"])
+    assert np.allclose(total, plume + data["background_conc_ug_m3"])
+
+
+def test_gradient_mode_returns_field_and_total():
+    resp = client.post("/api/plume/grid", json=_gradient_payload())
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["background_mode"] == "linear_gradient"
+    bg = np.array(data["background_field_ug_m3"])
+    plume = np.array(data["plume_field_ug_m3"])
+    total = np.array(data["total_conc_ug_m3"])
+    assert bg.shape == plume.shape
+    assert np.allclose(total, plume + bg)
+    # 西风（270°）烟羽向东：背景应沿东向递增，且逐点等于 base+2·E/1000
+    assert bg.max() > bg.min()
+    e0 = 10.0 + 2.0 * (-300.0) / 1000.0  # 网格最西节点 E=-300 m
+    assert abs(bg.min() - e0) < 1e-9
+    detail = data["background_detail"]
+    assert len(detail["rect_corners_lonlat"]) == 4
+    assert detail["grid_background_min_ug_m3"] >= 0.0
+
+
+def test_gradient_zero_slopes_match_constant_mode():
+    """斜率为 0：总量数组与常数模式逐元素完全相同。"""
+    g = client.post(
+        "/api/plume/grid",
+        json=_gradient_payload(
+            base_value_ug_m3=10.0,
+            slope_east_ug_m3_per_km=0.0,
+            slope_north_ug_m3_per_km=0.0,
+        ),
+    ).json()
+    c = client.post("/api/plume/grid", json=_base_payload(bg=10.0)).json()
+    assert np.array_equal(
+        np.array(g["total_conc_ug_m3"]), np.array(c["total_conc_ug_m3"])
+    )
+    assert np.array_equal(
+        np.array(g["background_field_ug_m3"]), np.full((81, 121), 10.0)
+    )
+
+
+def test_gradient_same_receptor_resolution_independent():
+    """同一物理受体在两种网格分辨率下背景与总量相同。"""
+    payload = _gradient_payload()
+    payload["grid"] = {
+        "downwind_extent_m": 2000.0, "crosswind_extent_m": 400.0,
+        "upwind_extent_m": 0.0, "nx": 21, "ny": 5,
+    }
+    coarse = client.post("/api/plume/grid", json=payload).json()
+    payload["grid"]["nx"], payload["grid"]["ny"] = 41, 9
+    fine = client.post("/api/plume/grid", json=payload).json()
+    # x=1000 m, y=0 在两种网格中都是格点（中心节点）
+    bg_c = coarse["background_field_ug_m3"][2][10]
+    bg_f = fine["background_field_ug_m3"][4][20]
+    tot_c = coarse["total_conc_ug_m3"][2][10]
+    tot_f = fine["total_conc_ug_m3"][4][20]
+    assert bg_c == bg_f == 12.0  # base 10 + 2·(1000/1000)
+    assert tot_c == tot_f
+
+
+def test_gradient_grid_outside_rect_rejected():
+    resp = client.post(
+        "/api/plume/grid",
+        json=_gradient_payload(east_max_m=1000.0),  # 网格东界 6000 m
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"] == "invalid_input"
+    assert "外推" in body["message"]
+
+
+def test_gradient_negative_background_rejected():
+    resp = client.post(
+        "/api/plume/grid",
+        json=_gradient_payload(
+            base_value_ug_m3=1.0, slope_east_ug_m3_per_km=-2.0
+        ),
+    )
+    assert resp.status_code == 422
+    assert "负" in resp.json()["message"]
+
+
+def test_gradient_points_outside_rect_not_extrapolated():
+    payload = _gradient_payload(east_min_m=-1000.0, east_max_m=1000.0)
+    src_lon, src_lat = payload["source"]["lon"], payload["source"]["lat"]
+    m_per_deg = 6_371_000.0 * math.cos(math.radians(src_lat))
+    dlon_in = math.degrees(500.0 / m_per_deg)
+    dlon_out = math.degrees(5000.0 / m_per_deg)
+    payload["points"] = [
+        [src_lon + dlon_out, src_lat],
+        [src_lon + dlon_in, src_lat],
+    ]
+    resp = client.post("/api/plume/points", json=payload)
+    assert resp.status_code == 200, resp.text
+    p_out, p_in = resp.json()["points"]
+    # 矩形外：背景与总量为 null，附明确范围说明，烟羽仍返回
+    assert p_out["background_conc_ug_m3"] is None
+    assert p_out["total_conc_ug_m3"] is None
+    assert "矩形" in p_out["background_note"]
+    assert p_out["plume_conc_ug_m3"] >= 0
+    # 矩形内：背景 = base + 2·0.5 = 11
+    assert abs(p_in["background_conc_ug_m3"] - 11.0) < 1e-9
+    assert abs(
+        p_in["total_conc_ug_m3"]
+        - (p_in["plume_conc_ug_m3"] + p_in["background_conc_ug_m3"])
+    ) < 1e-9
+
+
+def test_gradient_rect_validation():
+    p = _gradient_payload(east_min_m=1000.0, east_max_m=-1000.0)
+    resp = client.post("/api/plume/grid", json=p)
+    assert resp.status_code == 422
